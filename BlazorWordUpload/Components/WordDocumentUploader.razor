@@ -1,0 +1,196 @@
+@using DocumentFormat.OpenXml.Packaging
+@using DocumentFormat.OpenXml.Wordprocessing
+@implements IDisposable
+
+<div class="word-uploader">
+    <h3>Subir Documento Word (.docx)</h3>
+    
+    <div class="upload-section">
+        <InputFile OnChange="HandleFileSelected" 
+                   accept=".docx" 
+                   class="form-control" />
+    </div>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger mt-3">
+            @errorMessage
+        </div>
+    }
+
+    @if (isProcessing)
+    {
+        <div class="alert alert-info mt-3">
+            Procesando documento...
+        </div>
+    }
+
+    @if (tableRows.Count > 0)
+    {
+        <div class="table-section mt-4">
+            <h4>Contenido del Documento</h4>
+            <div class="table-responsive">
+                <table class="table table-bordered table-striped">
+                    <thead class="table-dark">
+                        <tr>
+                            @foreach (var header in tableHeaders)
+                            {
+                                <th>@header</th>
+                            }
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in tableRows)
+                        {
+                            <tr>
+                                @foreach (var cell in row)
+                                {
+                                    <td>@cell</td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+
+    @if (paragraphs.Count > 0)
+    {
+        <div class="paragraph-section mt-4">
+            <h4>Párrafos del Documento</h4>
+            <div class="paragraphs-container">
+                @foreach (var paragraph in paragraphs)
+                {
+                    <p class="paragraph-item">@paragraph</p>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private List<List<string>> tableHeaders = new();
+    private List<List<string>> tableRows = new();
+    private List<string> paragraphs = new();
+    private string? errorMessage;
+    private bool isProcessing;
+
+    private async Task HandleFileSelected(InputFileChangeEventArgs e)
+    {
+        try
+        {
+            errorMessage = null;
+            tableHeaders.Clear();
+            tableRows.Clear();
+            paragraphs.Clear();
+            isProcessing = true;
+            StateHasChanged();
+
+            var file = e.File;
+            if (file == null)
+            {
+                errorMessage = "No se seleccionó ningún archivo";
+                return;
+            }
+
+            if (!file.Name.EndsWith(".docx", StringComparison.OrdinalIgnoreCase))
+            {
+                errorMessage = "El archivo debe ser un documento .docx";
+                return;
+            }
+
+            using var stream = file.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024); // 10 MB
+            await ProcessWordDocumentAsync(stream);
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error al procesar el documento: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+            StateHasChanged();
+        }
+    }
+
+    private Task ProcessWordDocumentAsync(Stream stream)
+    {
+        return Task.Run(() =>
+        {
+            using var doc = WordprocessingDocument.Open(stream, false);
+            
+            var documentBody = doc.MainDocumentPart?.Document?.Body;
+            if (documentBody == null)
+            {
+                errorMessage = "El documento no tiene contenido";
+                return;
+            }
+
+            // Extraer tablas
+            var tables = documentBody.Elements<Table>().ToList();
+            foreach (var table in tables)
+            {
+                var rows = table.Elements<TableRow>().ToList();
+                if (rows.Any())
+                {
+                    // Primera fila como encabezado
+                    var headerRow = rows.First();
+                    var headers = headerRow.Elements<TableCell>()
+                        .Select(cell => GetCellText(cell))
+                        .ToList();
+                    
+                    if (headers.Any(h => !string.IsNullOrWhiteSpace(h)))
+                    {
+                        tableHeaders.Add(headers);
+                        
+                        // Filas de datos
+                        foreach (var row in rows.Skip(1))
+                        {
+                            var rowData = row.Elements<TableCell>()
+                                .Select(cell => GetCellText(cell))
+                                .ToList();
+                            tableRows.Add(rowData);
+                        }
+                    }
+                }
+            }
+
+            // Extraer párrafos (excluyendo los que están dentro de tablas)
+            var tableParagraphs = tables.SelectMany(t => t.Elements<TableRow>()
+                .SelectMany(r => r.Elements<TableCell>()
+                .SelectMany(c => c.Elements<Paragraph>()))).ToHashSet();
+
+            var documentParagraphs = documentBody.Elements<Paragraph>()
+                .Where(p => !tableParagraphs.Contains(p))
+                .ToList();
+
+            foreach (var paragraph in documentParagraphs)
+            {
+                var text = GetParagraphText(paragraph);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    paragraphs.Add(text);
+                }
+            }
+        });
+    }
+
+    private static string GetCellText(TableCell cell)
+    {
+        var paragraph = cell.Elements<Paragraph>().FirstOrDefault();
+        return paragraph != null ? GetParagraphText(paragraph) : string.Empty;
+    }
+
+    private static string GetParagraphText(Paragraph paragraph)
+    {
+        var runs = paragraph.Elements<Run>();
+        var texts = runs.SelectMany(run => run.Elements<Text>().Select(t => t.Text));
+        return string.Join(string.Empty, texts).Trim();
+    }
+
+    public void Dispose()
+    {
+        // Limpieza si es necesaria
+    }
+}
